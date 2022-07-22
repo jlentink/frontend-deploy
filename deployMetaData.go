@@ -1,5 +1,6 @@
 package main
 
-type deployMetaData struct {
+// DeployMetaData JSON structure
+type DeployMetaData struct {
 	DeployDate int64 `json:"deployDate"`
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/dustin/go-humanize"
@@ -25,28 +26,31 @@ var (
 	branchPtr     *string
 	publicPath    *string
 	frontendPath  *string
+	cleanTimePtr  *int
+	cleanOnlyPtr  *bool
+	version       string
 	help          *bool
 )
 
 func displayHelp() {
 	fmt.Printf("Usage of %s\n\n", color.Bold.Sprintf(os.Args[0]))
-	fmt.Println("Upload a frontend folder to monkapps via SSH")
+	fmt.Println("Upload a frontend folder to server via SCP")
 	fmt.Println("and generate an index to display which branches are available")
 	fmt.Println("")
 	fmt.Println("")
 	color.Bold.Println("Credentials:")
-	fmt.Println("  -username | Env variable[MONKAPPS_USERNAME]: Set the username for the connection to Monkapps.")
-	fmt.Println("  -password | Env variable[MONKAPPS_PASSWORD]: Set the password for the connection to Monkapps.")
+	fmt.Println("  -username | Env variable[USERNAME]: Set the username for the connection to server.")
+	fmt.Println("  -password | Env variable[PASSWORD]: Set the password for the connection to server.")
 	fmt.Println("")
 	color.Bold.Println("Connection:")
-	fmt.Println("  -server | Env variable[MONKAPPS_SERVER]: Which server to connect to")
-	fmt.Println("  -port | Env variable[MONKAPPS_SERVER_PORT]: Which tcp port to connect to")
+	fmt.Println("  -server | Env variable[SERVER]: Which server to connect to")
+	fmt.Println("  -port | Env variable[SERVER_PORT]: Which tcp port to connect to")
 	fmt.Println("")
 	color.Bold.Println("Setup:")
-	fmt.Println("  -publicPath | Env variable[MONKAPPS_FRONTEND_PATH]: What is the public path on monkapps defaults to ~/public when not provided.")
-	fmt.Println("  -frontendPath | Env variable[MONKAPPS_FRONTEND_PATH]: What is the path with the compiled frontend code.")
+	fmt.Println("  -publicPath | Env variable[PUBLIC_PATH]: What is the public path on the server defaults to 'public' when not provided.")
+	fmt.Println("  -frontendPath | Env variable[FRONTEND_PATH]: What is the path with the compiled frontend code.")
 	fmt.Println("")
-	fmt.Println("")
+	fmt.Printf("Version: %s", version)
 	os.Exit(0)
 }
 
@@ -85,80 +89,15 @@ func overwriteVariableWithEnv(option *string, envVariable string, force bool) {
 	}
 }
 
-func main() {
-	var fileCount int = 0
-	var totalBytes uint64 = 0
-	usernamePtr = flag.String("username", "", "server username")
-	passwordPtr = flag.String("password", "", "server password")
-	serverPtr = flag.String("server", "eu.dev.monkapps.com", "Server")
-	serverPortPtr = flag.String("port", "22", "Server port")
-	branchPtr = flag.String("branch", "", "Git Branch")
-	publicPath = flag.String("publicPath", "~/public", "Public path")
-	frontendPath = flag.String("frontendPath", "", "Path to frontend")
-	help = flag.Bool("help", false, "Display full help text.")
-	flag.Parse()
-
-	if *help {
-		displayHelp()
-	}
-
-	overwriteVariableWithEnv(serverPtr, "MONKAPPS_SERVER", true)
-	overwriteVariableWithEnv(serverPortPtr, "MONKAPPS_SERVER_PORT", true)
-	overwriteVariableWithEnv(publicPath, "MONKAPPS_PUBLIC_PATH", true)
-	overwriteVariableWithEnv(frontendPath, "MONKAPPS_FRONTEND_PATH", true)
-	overwriteVariableWithEnv(usernamePtr, "MONKAPPS_USERNAME", false)
-	overwriteVariableWithEnv(passwordPtr, "MONKAPPS_PASSWORD", false)
-
-	if len(*branchPtr) == 0 {
-		*branchPtr = getBranchFromGit()
-		if len(*branchPtr) == 0 {
-			*branchPtr = getVariableFromEnvironmentAndExit("MONKAPPS_BRANCH", "No branch supplied")
-		}
-	}
-
-	if _, err := os.Stat(*frontendPath); os.IsNotExist(err) {
-		fmt.Println("Couldn't find the frontend folder.")
-		os.Exit(1)
-	}
-
-	config := &ssh.ClientConfig{
-		User: *usernamePtr,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(*passwordPtr),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-	conn, err := ssh.Dial("tcp", *serverPtr+":"+*serverPortPtr, config)
-	if err != nil {
-		fmt.Println("Couldn't establish a connection to the remote server ", err)
-		os.Exit(1)
-	}
-
-	defer func(conn *ssh.Client) {
-		err := conn.Close()
-		if err != nil {
-			fmt.Printf("Could not close SSH connection. (%s)", err.Error())
-		}
-	}(conn)
-
+func upload(client *sftp.Client) {
 	start := time.Now()
-
-	// create new SFTP client
-	client, err := sftp.NewClient(conn)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func(client *sftp.Client) {
-		err := client.Close()
-		if err != nil {
-			fmt.Printf("Could not close SFTP connection. (%s)", err.Error())
-		}
-	}(client)
+	var fileCount = 0
+	var totalBytes uint64 = 0
 
 	branchRoot := addTrailingSlash(*publicPath) + addTrailingSlash(*branchPtr)
 
 	var fileList []string
-	err = filepath.Walk(*frontendPath, func(path string, f os.FileInfo, err error) error {
+	err := filepath.Walk(*frontendPath, func(path string, f os.FileInfo, err error) error {
 		fileList = append(fileList, path)
 		return nil
 	})
@@ -217,16 +156,178 @@ func main() {
 	fileCount++
 	totalBytes += uint64(bytes)
 
-	dstJson, err := client.Create(addTrailingSlash(branchRoot) + "deploy.json")
+	dstJSON, err := client.Create(addTrailingSlash(branchRoot) + "deploy.json")
 	if err != nil {
 		fmt.Printf("Error while creating meta file. (%s)\n", err.Error())
 		os.Exit(1)
 	}
-	bytes, err = io.Copy(dstJson, metadataJSON())
+	bytes, err = io.Copy(dstJSON, metadataJSON())
 	fmt.Printf("Creating and copying new deploy.json - %s copied\n", humanize.Bytes(uint64(bytes)))
 	fileCount++
 	totalBytes += uint64(bytes)
 	fmt.Printf("-----------------------------------------------------------------------------------\n")
 	fmt.Printf("Files copied: %d (%s) - %s\n", fileCount, humanize.Bytes(totalBytes), time.Since(start))
 	fmt.Printf("-----------------------------------------------------------------------------------\n\n")
+}
+
+func reverse(s []string) []string {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+	return s
+}
+func removeAll(client *sftp.Client, path string) {
+	paths := readAll(client, path)
+	reverse(paths)
+	for _, cPath := range paths {
+		fmt.Println("Cleaning file:" + cPath)
+		client.Remove(cPath)
+	}
+}
+
+func readAll(client *sftp.Client, path string) []string {
+	paths := make([]string, 0)
+	paths = append(paths, path)
+	fp, err := client.Open(path)
+	if err != nil {
+		return make([]string, 0)
+	}
+	fs, err := fp.Stat()
+	if err != nil {
+		return make([]string, 0)
+	}
+
+	if fs.IsDir() {
+		fl, err := client.ReadDir(path)
+		if err != nil {
+			return make([]string, 0)
+		}
+		for _, cfp := range fl {
+			if cfp.IsDir() {
+				paths = append(paths, readAll(client, path+"/"+cfp.Name())...)
+			} else {
+				paths = append(paths, path+"/"+cfp.Name())
+			}
+		}
+	}
+	return paths
+}
+
+func cleanup(client *sftp.Client) {
+	now := time.Now()
+	files, err := client.ReadDir(*publicPath)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	for _, file := range files {
+		if file.IsDir() {
+			deployMetaDataFile, err := client.Open(*publicPath + "/" + file.Name() + "/deploy.json")
+			if err != nil {
+				continue
+			}
+			deployMetaData, err := client.Open(*publicPath + "/" + file.Name() + "/deploy.json")
+			if err != nil {
+				fmt.Printf("Cannot read deploy.json on %s (%s)", file.Name(), err.Error())
+				os.Exit(1)
+			}
+			stat, err := deployMetaDataFile.Stat()
+			if err != nil {
+				fmt.Printf("Cannot stat deploy.json on %s (%s)", file.Name(), err.Error())
+				os.Exit(1)
+			}
+
+			jsonData := make([]byte, stat.Size())
+			_, err = deployMetaData.Read(jsonData)
+			if err != nil {
+				fmt.Printf("Cannot read deploy.json on %s (%s)", file.Name(), err.Error())
+				os.Exit(1)
+			}
+			deployJSONMetaData := DeployMetaData{}
+			json.Unmarshal(jsonData, &deployJSONMetaData)
+
+			timeWindow := now.Unix() - int64(*cleanTimePtr*86400)
+			fmt.Printf("Branch: %s - %d days Old", file.Name(), (now.Unix()-deployJSONMetaData.DeployDate)/86400)
+			if deployJSONMetaData.DeployDate < timeWindow {
+				println(" - deleting....")
+				removeAll(client, *publicPath+"/"+file.Name())
+			} else {
+				println(" - to young skipping...")
+			}
+		}
+	}
+}
+
+func main() {
+	usernamePtr = flag.String("username", "", "server username")
+	passwordPtr = flag.String("password", "", "server password")
+	serverPtr = flag.String("server", "", "Server")
+	serverPortPtr = flag.String("port", "22", "Server port")
+	cleanTimePtr = flag.Int("clean-days", 30, "Clean old branches not touche for days")
+	branchPtr = flag.String("branch", "", "Git Branch")
+	publicPath = flag.String("publicPath", "public", "Public path")
+	frontendPath = flag.String("frontendPath", "", "Path to frontend")
+	help = flag.Bool("help", false, "Display full help text.")
+	cleanOnlyPtr = flag.Bool("clean-only", false, "Clean only")
+	flag.Parse()
+
+	if *help {
+		displayHelp()
+	}
+
+	overwriteVariableWithEnv(serverPtr, "SERVER", true)
+	overwriteVariableWithEnv(serverPortPtr, "SERVER_PORT", true)
+	overwriteVariableWithEnv(publicPath, "PUBLIC_PATH", true)
+	overwriteVariableWithEnv(frontendPath, "FRONTEND_PATH", true)
+	overwriteVariableWithEnv(usernamePtr, "USERNAME", false)
+	overwriteVariableWithEnv(passwordPtr, "PASSWORD", false)
+
+	if len(*branchPtr) == 0 {
+		*branchPtr = getBranchFromGit()
+		if len(*branchPtr) == 0 {
+			*branchPtr = getVariableFromEnvironmentAndExit("BRANCH", "No branch supplied")
+		}
+	}
+
+	if _, err := os.Stat(*frontendPath); os.IsNotExist(err) {
+		fmt.Println("Couldn't find the frontend folder.")
+		os.Exit(1)
+	}
+
+	config := &ssh.ClientConfig{
+		User: *usernamePtr,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(*passwordPtr),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+	conn, err := ssh.Dial("tcp", *serverPtr+":"+*serverPortPtr, config)
+	if err != nil {
+		fmt.Println("Couldn't establish a connection to the remote server ", err)
+		os.Exit(1)
+	}
+
+	defer func(conn *ssh.Client) {
+		err := conn.Close()
+		if err != nil {
+			fmt.Printf("Could not close SSH connection. (%s)", err.Error())
+		}
+	}(conn)
+
+	// create new SFTP client
+	client, err := sftp.NewClient(conn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func(client *sftp.Client) {
+		err := client.Close()
+		if err != nil {
+			fmt.Printf("Could not close SFTP connection. (%s)", err.Error())
+		}
+	}(client)
+
+	if !*cleanOnlyPtr {
+		upload(client)
+	}
+	cleanup(client)
 }

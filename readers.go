@@ -12,14 +12,13 @@ import (
 //go:embed index.php
 var phpContent string
 
-
 func indexPhpReader() *strings.Reader {
 	return strings.NewReader(phpContent)
 }
 
-func metadataJSON() *bytes.Reader  {
+func metadataJSON() *bytes.Reader {
 	now := time.Now()
-	metadata := deployMetaData{DeployDate: now.Unix()}
+	metadata := DeployMetaData{DeployDate: now.Unix()}
 	b, err := json.Marshal(metadata)
 	if err != nil {
 		fmt.Println(err)
