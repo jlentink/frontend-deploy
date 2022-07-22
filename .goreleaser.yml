@@ -51,13 +51,16 @@ dockers:
     goos: linux
     goarch: amd64
     image_templates:
-      - "jlentink/frontend-deploy:1.0.0"
+      - "jlentink/frontend-deploy:latest"
+      - "jlentink/frontend-deploy:{{ .Version }}"
+
     build_flag_templates:
       - "--pull"
       - "--label=org.opencontainers.image.created={{.Date}}"
       - "--label=org.opencontainers.image.title={{.ProjectName}}"
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--platform=linux/arm64"
     extra_files:
       - ./dist/frontend-deploy_darwin_amd64/frontend-deploy
     skip_push: false
