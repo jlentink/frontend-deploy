@@ -59,6 +59,6 @@ dockers:
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.version={{.Version}}"
     extra_files:
-      - frontend-deploy
+      - ./dist/frontend-deploy_darwin_amd64/frontend-deploy
     skip_push: false
     dockerfile: Dockerfile
